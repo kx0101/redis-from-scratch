@@ -6,4 +6,5 @@ set(CMAKE_CXX_STANDARD 17)
 add_executable(redis-cli
     main.cpp
     parser/parser.cpp
+    redis_server.cpp
 )
