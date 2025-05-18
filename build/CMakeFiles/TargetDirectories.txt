@@ -1,0 +1,3 @@
+/home/elijahkx/personal/cpp/redis-from-scratch/build/CMakeFiles/redis-cli.dir
+/home/elijahkx/personal/cpp/redis-from-scratch/build/CMakeFiles/edit_cache.dir
+/home/elijahkx/personal/cpp/redis-from-scratch/build/CMakeFiles/rebuild_cache.dir
