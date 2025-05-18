@@ -5,8 +5,10 @@
 #include <algorithm>
 #include <cstring>
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "parser/parser.h"
@@ -14,6 +16,78 @@
 using namespace std;
 
 constexpr int BUFFER_SIZE = 512;
+
+unordered_map<string, vector<uint8_t>> kv_store;
+mutex kv_mutex;
+
+void send_response(int client_socket, const string& response) {
+    write(client_socket, response.c_str(), response.size());
+}
+
+void send_raw(int client_socket, const uint8_t* data, size_t size) {
+    write(client_socket, data, size);
+    write(client_socket, "\r\n", 2);
+}
+
+void handle_command(const vector<vector<uint8_t>>& args, int client_socket) {
+    if (args.empty()) {
+        send_response(client_socket, "-ERR empty command\r\n");
+        return;
+    }
+
+    string command(args[0].begin(), args[0].end());
+    transform(command.begin(), command.end(), command.begin(), ::toupper);
+
+    if (command == "PING") {
+        send_response(client_socket, "+PONG\r\n");
+    } else if (command == "ECHO") {
+        if (args.size() > 1) {
+            string response(args[1].begin(), args[1].end());
+            send_response(client_socket, "+" + response + "\r\n");
+        } else {
+            send_response(client_socket, "-ERR ECHO requires argument\r\n");
+        }
+    } else if (command == "SET") {
+        if (args.size() <= 2) {
+            send_response(client_socket, "-ERR SET requires key and value\r\n");
+            return;
+        }
+
+        string key(args[1].begin(), args[1].end());
+        vector<uint8_t> value(args[2].begin(), args[2].end());
+
+        {
+            lock_guard<mutex> lock(kv_mutex);
+            kv_store[key] = std::move(value);
+        }
+
+        send_response(client_socket, "+OK\r\n");
+    } else if (command == "GET") {
+        if (args.size() <= 1) {
+            send_response(client_socket, "-ERR GET requires key\r\n");
+            return;
+        }
+
+        string key(args[1].begin(), args[1].end());
+        vector<uint8_t> value;
+
+        {
+            lock_guard<mutex> lock(kv_mutex);
+            auto it = kv_store.find(key);
+            if (it != kv_store.end()) {
+                value = it->second;
+            } else {
+                send_response(client_socket, "$-1\r\n");
+                return;
+            }
+        }
+
+        send_response(client_socket, "$" + to_string(value.size()) + "\r\n");
+        send_raw(client_socket, value.data(), value.size());
+    } else {
+        send_response(client_socket, "-ERR unknown command\r\n");
+    }
+}
 
 void handle_connection(int client_socket) {
     vector<uint8_t> buffer(BUFFER_SIZE);
@@ -31,41 +105,13 @@ void handle_connection(int client_socket) {
 
         while (true) {
             auto result = parse_resp_command({buffer.begin() + start, buffer.begin() + buf_len}, buf_len - start);
-
-            if (!result) {
+            if (!result)
                 break;
-            }
 
             auto [args, parsed_len] = *result;
             start += parsed_len;
 
-            if (args.empty()) {
-                cout << "empty command" << endl;
-                continue;
-            }
-
-            string command(args[0].begin(), args[0].end());
-            transform(command.begin(), command.end(), command.begin(), ::toupper);
-
-            cout << "command: " << command << endl;
-
-            if (command == "PING") {
-                const char* pong = "+PONG\r\n";
-                write(client_socket, pong, strlen(pong));
-            } else if (command == "ECHO") {
-                if (args.size() > 1) {
-                    string response(args[1].begin(), args[1].end());
-                    response += "\r\n";
-
-                    write(client_socket, response.c_str(), response.size());
-                } else {
-                    string err = "-ERR ECHO requires argument\r\n";
-                    write(client_socket, err.c_str(), err.size());
-                }
-            } else {
-                string err = "-ERR unknown command\r\n";
-                write(client_socket, err.c_str(), err.size());
-            }
+            handle_command(args, client_socket);
         }
 
         if (start < buf_len) {
@@ -84,7 +130,7 @@ int main() {
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd == -1) {
         perror("socket failed");
-        exit(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
 
     sockaddr_in address{};
@@ -94,27 +140,25 @@ int main() {
 
     if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
         perror("bind failed");
-        exit(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
 
     if (listen(server_fd, 3) < 0) {
         perror("listen failed");
-        exit(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
 
     cout << "listening on port 6379" << endl;
 
     while (true) {
         socklen_t addrlen = sizeof(address);
-        int new_socket = accept(server_fd, (struct sockaddr*)&address, &addrlen);
-        if (new_socket < 0) {
+        int client_socket = accept(server_fd, (struct sockaddr*)&address, &addrlen);
+        if (client_socket < 0) {
             perror("accept failed");
             continue;
         }
 
         cout << "accepted new connection" << endl;
-        thread(handle_connection, new_socket).detach();
+        thread(handle_connection, client_socket).detach();
     }
-
-    return 0;
 }
