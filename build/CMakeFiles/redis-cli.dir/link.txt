@@ -1,1 +1,0 @@
-/usr/bin/c++ "CMakeFiles/redis-cli.dir/main.cpp.o" "CMakeFiles/redis-cli.dir/parser/parser.cpp.o" -o redis-cli
