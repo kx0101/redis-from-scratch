@@ -7,4 +7,5 @@ add_executable(redis-cli
     main.cpp
     parser/parser.cpp
     redis_server.cpp
+    utils/utils.cpp
 )

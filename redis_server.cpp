@@ -1,10 +1,10 @@
 #include "redis_server.h"
 
-#include <algorithm>
 #include <cstring>
 #include <iostream>
 
 #include "parser/parser.h"
+#include "utils/utils.h"
 
 using namespace std;
 
@@ -48,7 +48,7 @@ void RedisServer::run() {
 }
 
 void RedisServer::handle_client(int client_socket) {
-    constexpr int BUFFER_SIZE = 512;
+    constexpr int BUFFER_SIZE = 10;
     vector<uint8_t> buffer(BUFFER_SIZE);
     size_t buf_len = 0;
 
@@ -73,11 +73,13 @@ void RedisServer::handle_client(int client_socket) {
             handle_command(args, client_socket);
         }
 
-        if (start < buf_len) {
+        if (start > 0) {
             memmove(buffer.data(), buffer.data() + start, buf_len - start);
             buf_len -= start;
-        } else {
-            buf_len = 0;
+        }
+
+        if (buf_len == buffer.size()) {
+            buffer.resize(buffer.size() * 2);
         }
     }
 
@@ -87,74 +89,114 @@ void RedisServer::handle_client(int client_socket) {
 
 void RedisServer::handle_command(const vector<vector<uint8_t>>& args, int client_socket) {
     if (args.empty()) {
-        send_response(client_socket, "-ERR empty command\r\n");
-        return;
+        return send_response(client_socket, "-ERR empty command\r\n");
     }
 
-    string command(args[0].begin(), args[0].end());
-    transform(command.begin(), command.end(), command.begin(), ::toupper);
+    string command = to_upper(bytes_to_string(args[0]));
 
     if (command == "PING") {
-        send_response(client_socket, "+PONG\r\n");
-        return;
+        return handle_ping(client_socket);
     }
 
     if (command == "ECHO") {
-        if (args.size() > 1) {
-            string response(args[1].begin(), args[1].end());
-            send_response(client_socket, "+" + response + "\r\n");
-            return;
-        }
+        return handle_echo(args, client_socket);
+    }
 
+    if (command == "SET") {
+        return handle_set(args, client_socket);
+    }
+
+    if (command == "GET") {
+        return handle_get(args, client_socket);
+    }
+
+    send_response(client_socket, "-ERR unknown command\r\n");
+}
+
+void RedisServer::handle_ping(int client_socket) {
+    send_response(client_socket, "+PONG\r\n");
+}
+
+void RedisServer::handle_echo(const vector<vector<uint8_t>>& args, int client_socket) {
+    if (args.size() < 2) {
         send_response(client_socket, "-ERR ECHO requires argument\r\n");
         return;
     }
 
-    if (command == "SET") {
-        if (args.size() <= 2) {
-            send_response(client_socket, "-ERR SET requires key and value\r\n");
-            return;
-        }
+    string message = bytes_to_string(args[1]);
+    send_response(client_socket, "+" + message + "\r\n");
+}
 
-        string key(args[1].begin(), args[1].end());
-        vector<uint8_t> value(args[2].begin(), args[2].end());
-
-        {
-            lock_guard<mutex> lock(kv_mutex_);
-            kv_store_[key] = std::move(value);
-        }
-
-        send_response(client_socket, "+OK\r\n");
-
+void RedisServer::handle_set(const vector<vector<uint8_t>>& args, int client_socket) {
+    if (args.size() < 3) {
+        send_response(client_socket, "-ERR SET requires key and value\r\n");
         return;
     }
 
-    if (command == "GET") {
-        if (args.size() <= 1) {
-            send_response(client_socket, "-ERR GET requires key\r\n");
-            return;
-        }
+    string key = bytes_to_string(args[1]);
+    vector<uint8_t> value(args[2]);
 
-        string key(args[1].begin(), args[1].end());
-        vector<uint8_t> value;
+    optional<chrono::steady_clock::time_point> expiry_time;
 
-        {
-            lock_guard<mutex> lock(kv_mutex_);
-            auto it = kv_store_.find(key);
-            if (it != kv_store_.end()) {
-                value = it->second;
-            } else {
-                send_response(client_socket, "$-1\r\n");
+    if (args.size() >= 5) {
+        string option = to_upper(bytes_to_string(args[3]));
+
+        if (option == "PX") {
+            string px_str = bytes_to_string(args[4]);
+            try {
+                int64_t px = stoll(px_str);
+                expiry_time = chrono::steady_clock::now() + chrono::milliseconds(px);
+            } catch (const invalid_argument&) {
+                send_response(client_socket, "-ERR invalid PX value\r\n");
                 return;
             }
         }
+    }
 
-        send_response(client_socket, "$" + to_string(value.size()) + "\r\n");
-        send_raw(client_socket, value.data(), value.size());
+    {
+        lock_guard<mutex> lock(kv_mutex_);
+        kv_store_[key] = std::move(value);
+
+        if (expiry_time) {
+            expiry_store_[key] = *expiry_time;
+        }
+    }
+
+    send_response(client_socket, "+OK\r\n");
+}
+
+void RedisServer::handle_get(const vector<vector<uint8_t>>& args, int client_socket) {
+    if (args.size() < 2) {
+        send_response(client_socket, "-ERR GET requires key\r\n");
         return;
     }
 
-    send_response(client_socket, "-ERR unknown command\r\n");
+    string key = bytes_to_string(args[1]);
+    vector<uint8_t> value;
+    bool found = false;
+
+    {
+        lock_guard<mutex> lock(kv_mutex_);
+        auto it = kv_store_.find(key);
+        if (it != kv_store_.end()) {
+            auto exp_it = expiry_store_.find(key);
+
+            if (exp_it != expiry_store_.end() && chrono::steady_clock::now() >= exp_it->second) {
+                kv_store_.erase(it);
+                expiry_store_.erase(exp_it);
+            } else {
+                value = it->second;
+                found = true;
+            }
+        }
+    }
+
+    if (found) {
+        send_response(client_socket, "$" + to_string(value.size()) + "\r\n");
+        send_raw(client_socket, value.data(), value.size());
+    } else {
+        send_response(client_socket, "$-1\r\n");
+    }
 }
 
 void RedisServer::send_response(int client_socket, const std::string& response) {
