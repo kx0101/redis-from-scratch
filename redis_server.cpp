@@ -110,11 +110,43 @@ void RedisServer::handle_command(const vector<vector<uint8_t>>& args, int client
         return handle_get(args, client_socket);
     }
 
+    if (command == "DEL") {
+        return handle_del(args, client_socket);
+    }
+
     send_response(client_socket, "-ERR unknown command\r\n");
 }
 
 void RedisServer::handle_ping(int client_socket) {
     send_response(client_socket, "+PONG\r\n");
+}
+
+void RedisServer::handle_del(const vector<vector<uint8_t>>& args, int client_socket) {
+    if (args.size() < 2) {
+        send_response(client_socket, "-ERR DEL requires key\r\n");
+        return;
+    }
+
+    int deleted_count = 0;
+
+    string key = bytes_to_string(args[1]);
+    {
+        lock_guard<mutex> lock(kv_mutex_);
+
+        for (size_t i = 1; i < args.size(); ++i) {
+            string key = bytes_to_string(args[i]);
+
+            auto it = kv_store_.find(key);
+            if (it != kv_store_.end()) {
+                kv_store_.erase(it);
+                expiry_store_.erase(key);
+
+                deleted_count++;
+            }
+        }
+    }
+
+    send_response(client_socket, "$" + to_string(deleted_count) + "\r\n");
 }
 
 void RedisServer::handle_echo(const vector<vector<uint8_t>>& args, int client_socket) {

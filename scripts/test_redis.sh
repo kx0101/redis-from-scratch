@@ -58,9 +58,11 @@ print_test_header() {
 resp_ping="*1\r\n\$4\r\nPING\r\n"
 resp_echo_hello="*2\r\n\$4\r\nECHO\r\n\$5\r\nhello\r\n"
 resp_set_foo_bar="*3\r\n\$3\r\nSET\r\n\$3\r\nfoo\r\n\$3\r\nbar\r\n"
+resp_set_bar_baz="*3\r\n\$3\r\nSET\r\n\$3\r\nbar\r\n\$3\r\nbaz\r\n"
 resp_get_foo="*2\r\n\$3\r\nGET\r\n\$3\r\nfoo\r\n"
 resp_set_expiring="*5\r\n\$3\r\nSET\r\n\$3\r\nexp\r\n\$5\r\nvalue\r\n\$2\r\nPX\r\n\$3\r\n100\r\n"
 resp_get_exp="*2\r\n\$3\r\nGET\r\n\$3\r\nexp\r\n"
+resp_del="*3\r\n\$3\r\nDEL\r\n\$3\r\nfoo\r\n\$3\r\nbar\r\n"
 
 assert_response "PING" "$resp_ping" "+PONG"
 assert_response "ECHO hello" "$resp_echo_hello" "+hello"
@@ -68,6 +70,11 @@ assert_response "SET foo bar" "$resp_set_foo_bar" "+OK"
 assert_response "GET foo" "$resp_get_foo" "\$3\r\nbar"
 assert_response "SET exp PX 100" "$resp_set_expiring" "+OK"
 assert_response "GET exp (immediate)" "$resp_get_exp" "\$5\r\nvalue"
+assert_response "SET foo bar" "$resp_set_foo_bar" "+OK"
+assert_response "DEL foo" "$resp_del" "\$1\r\n"
+assert_response "SET foo bar" "$resp_set_foo_bar" "+OK"
+assert_response "SET bar baz" "$resp_set_bar_baz" "+OK"
+assert_response "DEL foo bar" "$resp_del" "\$2\r\n"
 
 sleep 0.2
 assert_response "GET exp (after 200ms, should expire)" "$resp_get_exp" "\$-1"
