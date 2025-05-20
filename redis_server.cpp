@@ -93,6 +93,7 @@ void RedisServer::handle_command(const vector<vector<uint8_t>>& args, int client
     }
 
     string command = to_upper(bytes_to_string(args[0]));
+    cout << "command: " << command << endl;
 
     if (command == "PING") {
         return handle_ping(client_socket);
@@ -112,6 +113,10 @@ void RedisServer::handle_command(const vector<vector<uint8_t>>& args, int client
 
     if (command == "DEL") {
         return handle_del(args, client_socket);
+    }
+
+    if (command == "EXISTS") {
+        return handle_exists(args, client_socket);
     }
 
     send_response(client_socket, "-ERR unknown command\r\n");
@@ -147,6 +152,39 @@ void RedisServer::handle_del(const vector<vector<uint8_t>>& args, int client_soc
     }
 
     send_response(client_socket, "$" + to_string(deleted_count) + "\r\n");
+}
+
+void RedisServer::handle_exists(const vector<vector<uint8_t>>& args, int client_socket) {
+    if (args.size() < 2) {
+        send_response(client_socket, "-ERR EXISTS requires key\r\n");
+        return;
+    }
+
+    int exists_count = 0;
+
+    {
+        lock_guard<mutex> lock(kv_mutex_);
+
+        for (size_t i = 1; i < args.size(); ++i) {
+            string key = bytes_to_string(args[i]);
+
+            auto it = kv_store_.find(key);
+            if (it != kv_store_.end()) {
+                auto exp_it = expiry_store_.find(key);
+
+                if (exp_it != expiry_store_.end() && chrono::steady_clock::now() >= exp_it->second) {
+                    kv_store_.erase(it);
+                    expiry_store_.erase(exp_it);
+
+                    continue;
+                }
+
+                exists_count++;
+            }
+        }
+    }
+
+    send_response(client_socket, "$" + to_string(exists_count) + "\r\n");
 }
 
 void RedisServer::handle_echo(const vector<vector<uint8_t>>& args, int client_socket) {
