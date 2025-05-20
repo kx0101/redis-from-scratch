@@ -31,6 +31,8 @@ private:
     void handle_get(const std::vector<std::vector<uint8_t>>& args, int client_socket);
     void handle_del(const std::vector<std::vector<uint8_t>>& args, int client_socket);
     void handle_exists(const std::vector<std::vector<uint8_t>>& args, int client_socket);
+    void handle_expire(const std::vector<std::vector<uint8_t>>& args, int client_socket);
+    void handle_ttl(const std::vector<std::vector<uint8_t>>& args, int client_socket);
     void send_response(int client_socket, const std::string& response);
     void send_raw(int client_socket, const uint8_t* data, size_t size);
 };

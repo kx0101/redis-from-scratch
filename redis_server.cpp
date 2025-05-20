@@ -1,5 +1,6 @@
 #include "redis_server.h"
 
+#include <chrono>
 #include <cstring>
 #include <iostream>
 
@@ -119,6 +120,14 @@ void RedisServer::handle_command(const vector<vector<uint8_t>>& args, int client
         return handle_exists(args, client_socket);
     }
 
+    if (command == "EXPIRE") {
+        return handle_expire(args, client_socket);
+    }
+
+    if (command == "TTL") {
+        return handle_ttl(args, client_socket);
+    }
+
     send_response(client_socket, "-ERR unknown command\r\n");
 }
 
@@ -151,7 +160,7 @@ void RedisServer::handle_del(const vector<vector<uint8_t>>& args, int client_soc
         }
     }
 
-    send_response(client_socket, "$" + to_string(deleted_count) + "\r\n");
+    send_response(client_socket, ":" + to_string(deleted_count) + "\r\n");
 }
 
 void RedisServer::handle_exists(const vector<vector<uint8_t>>& args, int client_socket) {
@@ -169,22 +178,105 @@ void RedisServer::handle_exists(const vector<vector<uint8_t>>& args, int client_
             string key = bytes_to_string(args[i]);
 
             auto it = kv_store_.find(key);
-            if (it != kv_store_.end()) {
-                auto exp_it = expiry_store_.find(key);
-
-                if (exp_it != expiry_store_.end() && chrono::steady_clock::now() >= exp_it->second) {
-                    kv_store_.erase(it);
-                    expiry_store_.erase(exp_it);
-
-                    continue;
-                }
-
-                exists_count++;
+            if (it == kv_store_.end()) {
+                continue;
             }
+
+            auto exp_it = expiry_store_.find(key);
+            if (exp_it != expiry_store_.end() && chrono::steady_clock::now() >= exp_it->second) {
+                kv_store_.erase(it);
+                expiry_store_.erase(exp_it);
+
+                continue;
+            }
+
+            exists_count++;
         }
     }
 
-    send_response(client_socket, "$" + to_string(exists_count) + "\r\n");
+    send_response(client_socket, ":" + to_string(exists_count) + "\r\n");
+}
+
+void RedisServer::handle_expire(const vector<vector<uint8_t>>& args, int client_socket) {
+    if (args.size() < 3) {
+        send_response(client_socket, "-ERR EXPIRE requires key and seconds\r\n");
+        return;
+    }
+
+    string key = bytes_to_string(args[1]);
+    int64_t seconds = 0;
+
+    try {
+        seconds = stoll(bytes_to_string(args[2]));
+    } catch (const invalid_argument&) {
+        send_response(client_socket, ":0\r\n");
+        return;
+    }
+
+    if (seconds < 0) {
+        send_response(client_socket, "-ERR EXPIRE seconds must be positive\r\n");
+        return;
+    }
+
+    auto expiry_time = chrono::steady_clock::now() + chrono::seconds(seconds);
+
+    {
+        lock_guard<mutex> lock(kv_mutex_);
+
+        auto it = kv_store_.find(key);
+        if (it == kv_store_.end()) {
+            send_response(client_socket, ":-1\r\n");
+            return;
+        }
+
+        auto exp_it = expiry_store_.find(key);
+        if (exp_it != expiry_store_.end()) {
+            exp_it->second = expiry_time;
+        } else {
+            expiry_store_[key] = expiry_time;
+        }
+    }
+
+    send_response(client_socket, ":1\r\n");
+}
+
+void RedisServer::handle_ttl(const vector<vector<uint8_t>>& args, int client_socket) {
+    if (args.size() < 2) {
+        send_response(client_socket, "-ERR TTL requires key\r\n");
+        return;
+    }
+
+    string key = bytes_to_string(args[1]);
+
+    {
+        lock_guard<mutex> lock(kv_mutex_);
+
+        auto it = kv_store_.find(key);
+        if (it == kv_store_.end()) {
+            send_response(client_socket, ":-2\r\n");
+            return;
+        }
+
+        auto exp_it = expiry_store_.find(key);
+        if (exp_it == expiry_store_.end()) {
+            send_response(client_socket, ":-1\r\n");
+            return;
+        }
+
+        auto now = chrono::steady_clock::now();
+        auto ttl = chrono::duration_cast<chrono::seconds>(exp_it->second - now).count();
+
+        if (ttl <= 0) {
+            kv_store_.erase(it);
+            expiry_store_.erase(exp_it);
+
+            send_response(client_socket, ":-2\r\n");
+            return;
+        }
+
+        ttl += 1; // adjust for overhead of checking expiry
+        send_response(client_socket, ":" + to_string(ttl) + "\r\n");
+    }
 }
 
 void RedisServer::handle_echo(const vector<vector<uint8_t>>& args, int client_socket) {
@@ -215,6 +307,11 @@ void RedisServer::handle_set(const vector<vector<uint8_t>>& args, int client_soc
             string px_str = bytes_to_string(args[4]);
             try {
                 int64_t px = stoll(px_str);
+                if (px < 0) {
+                    send_response(client_socket, "-ERR PX value must be positive\r\n");
+                    return;
+                }
+
                 expiry_time = chrono::steady_clock::now() + chrono::milliseconds(px);
             } catch (const invalid_argument&) {
                 send_response(client_socket, "-ERR invalid PX value\r\n");

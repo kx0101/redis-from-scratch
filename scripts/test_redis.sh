@@ -13,8 +13,18 @@ FAIL="❌"
 pass_count=0
 fail_count=0
 
+coproc REDIS_CONN { nc "$HOST" "$PORT"; }
+
 send_redis_cmd() {
-    echo -en "$1" | nc -N $HOST $PORT
+    echo -en "$1" >&"${REDIS_CONN[1]}"
+
+    local response=""
+    while read -r -t 0.1 line <&"${REDIS_CONN[0]}"; do
+        response+="$line"$'\n'
+        [[ "$line" == $'\r' ]] && break
+    done
+
+    echo -en "$response"
 }
 
 escape_newlines() {
@@ -63,9 +73,11 @@ resp_get_foo="*2\r\n\$3\r\nGET\r\n\$3\r\nfoo\r\n"
 resp_exists_foo="*2\r\n\$6\r\nEXISTS\r\n\$3\r\nfoo\r\n"
 resp_exists_foo_bar="*3\r\n\$6\r\nEXISTS\r\n\$3\r\nfoo\r\n\$3\r\nbar\r\n"
 resp_exists_foo_exp="*3\r\n\$6\r\nEXISTS\r\n\$3\r\nfoo\r\n\$3\r\nexp\r\n"
-resp_set_expiring="*5\r\n\$3\r\nSET\r\n\$3\r\nexp\r\n\$5\r\nvalue\r\n\$2\r\nPX\r\n\$3\r\n100\r\n"
+resp_set_expiring="*5\r\n\$3\r\nSET\r\n\$3\r\nexp\r\n\$5\r\nvalue\r\n\$2\r\nPX\r\n\$3\r\n500\r\n"
 resp_get_exp="*2\r\n\$3\r\nGET\r\n\$3\r\nexp\r\n"
 resp_del="*3\r\n\$3\r\nDEL\r\n\$3\r\nfoo\r\n\$3\r\nbar\r\n"
+resp_expire_foo_2="*3\r\n\$6\r\nEXPIRE\r\n\$3\r\nfoo\r\n\$1\r\n2\r\n"
+resp_ttl_foo="*2\r\n\$3\r\nTTL\r\n\$3\r\nfoo\r\n"
 
 # Ping
 assert_response "PING" "$resp_ping" "+PONG"
@@ -78,33 +90,46 @@ assert_response "SET foo bar" "$resp_set_foo_bar" "+OK"
 assert_response "GET foo" "$resp_get_foo" "\$3\r\nbar"
 
 # Set with expiration
-assert_response "SET exp value PX 100" "$resp_set_expiring" "+OK"
+assert_response "SET exp value PX 500 (in ms)" "$resp_set_expiring" "+OK"
 assert_response "GET exp (immediate)" "$resp_get_exp" "\$5\r\nvalue"
 
 # Get with expiration
-sleep 0.2
-assert_response "GET exp (after 200ms, should expire)" "$resp_get_exp" "\$-1"
+sleep 0.5
+assert_response "GET exp (after 500ms, should expire)" "$resp_get_exp" "\$-1"
 
 # Delete
 assert_response "SET foo bar" "$resp_set_foo_bar" "+OK"
-assert_response "DEL foo" "$resp_del" "\$1\r\n"
+assert_response "DEL foo" "$resp_del" ":1\r\n"
 assert_response "SET foo bar" "$resp_set_foo_bar" "+OK"
 assert_response "SET bar baz" "$resp_set_bar_baz" "+OK"
-assert_response "DEL foo bar" "$resp_del" "\$2\r\n"
+assert_response "DEL foo bar" "$resp_del" ":2\r\n"
 
 # Exists
 assert_response "SET foo bar" "$resp_set_foo_bar" "+OK"
-assert_response "EXISTS foo" "$resp_exists_foo" "\$1\r\n"
+assert_response "EXISTS foo" "$resp_exists_foo" ":1\r\n"
 assert_response "SET bar baz" "$resp_set_bar_baz" "+OK"
-assert_response "EXISTS foo bar" "$resp_exists_foo_bar" "\$2\r\n"
+assert_response "EXISTS foo bar" "$resp_exists_foo_bar" ":2\r\n"
 
 # Exists with expiration
 assert_response "SET foo bar" "$resp_set_foo_bar" "+OK"
-assert_response "SET exp value PX 100" "$resp_set_expiring" "+OK"
+assert_response "SET exp value PX 100 (in ms)" "$resp_set_expiring" "+OK"
 sleep 0.2
-assert_response "EXISTS foo exp" "$resp_exists_foo" "\$1\r\n"
+assert_response "EXISTS foo exp" "$resp_exists_foo" ":1\r\n"
+
+# Expire and TTL (add expiration)
+assert_response "SET foo bar" "$resp_set_foo_bar" "+OK"
+assert_response "TTL foo" "$resp_ttl_foo" ":-1\r\n"
+assert_response "EXPIRE foo 2 (in seconds)" "$resp_expire_foo_2" ":1\r\n"
+assert_response "TTL foo" "$resp_ttl_foo" ":2\r\n"
+assert_response "GET foo" "$resp_get_foo" "\$3\r\nbar"
+sleep 2.2
+assert_response "EXISTS foo" "$resp_exists_foo" ":0\r\n"
+assert_response "TTL foo" "$resp_ttl_foo" ":-2\r\n"
 
 echo
 echo "======================================"
 echo -e "Tests completed: ${GREEN}${pass_count} passed${NC}, ${RED}${fail_count} failed${NC}"
 echo "======================================"
+
+exec {REDIS_CONN[1]}>&-
+exec {REDIS_CONN[0]}>&-
